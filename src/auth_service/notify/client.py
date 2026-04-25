@@ -12,8 +12,20 @@ _CLI_RE = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 @dataclass(frozen=True)
 class NotifyRecipient:
     exists: bool
+    id: str | None = None
     external_id: str | None = None
     whatsapp_valid: bool | None = None
+
+
+def _parse_recipient(data: dict, *, exists: bool | None = None) -> NotifyRecipient:
+    if exists is None:
+        exists = bool(data.get("found") or data.get("external_id") or data.get("id"))
+    return NotifyRecipient(
+        exists=exists,
+        id=data.get("id"),
+        external_id=data.get("external_id"),
+        whatsapp_valid=data.get("whatsapp_valid"),
+    )
 
 
 class NotifyClient:
@@ -29,20 +41,24 @@ class NotifyClient:
             )
             response.raise_for_status()
             data = response.json()
-        exists = bool(data.get("found") or data.get("external_id"))
-        return NotifyRecipient(
-            exists=exists,
-            external_id=data.get("external_id"),
-            whatsapp_valid=data.get("whatsapp_valid"),
-        )
+        return _parse_recipient(data)
 
-    async def create_recipient(self, external_id: str, number: str) -> None:
+    async def create_recipient(self, external_id: str, number: str) -> NotifyRecipient:
+        """Cria (ou faz upsert) e retorna o recipient com whatsapp_valid resolvido."""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 f"{self.base_url}/api/v1/recipients",
                 json={"external_id": external_id, "phone": number},
             )
             response.raise_for_status()
+            data = response.json()
+        return _parse_recipient(data, exists=True)
+
+    async def delete_recipient(self, recipient_id: str) -> None:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.delete(f"{self.base_url}/api/v1/recipients/{recipient_id}")
+            if response.status_code not in (200, 204, 404):
+                response.raise_for_status()
 
     async def send_notification(self, external_id: str, message: str) -> None:
         try:

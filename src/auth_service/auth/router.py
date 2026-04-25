@@ -75,8 +75,8 @@ async def get_register_doc():
     status_code=status.HTTP_201_CREATED,
     responses={
         404: {"description": "role nao encontrada"},
-        400: {"description": "role nao permitida no registro"},
-        409: {"description": "telefone ja cadastrado"},
+        400: {"description": "role nao permitida ou numero sem WhatsApp"},
+        409: {"description": "telefone ja cadastrado (local ou Notify)"},
     },
 )
 async def register(payload: RegisterRequest, db: DbSession) -> RegisterResponse:
@@ -90,14 +90,29 @@ async def register(payload: RegisterRequest, db: DbSession) -> RegisterResponse:
         raise Conflict("telefone ja cadastrado")
 
     notify = await notify_client_from_db(db, _settings)
-    await notify.check_recipient(payload.phone)
 
+    # Bloqueio 1: numero ja cadastrado no Notify
+    pre = await notify.check_recipient(payload.phone)
+    if pre.exists:
+        raise Conflict("telefone ja cadastrado no Notify")
+
+    # Cria recipient no Notify (validacao de WhatsApp acontece aqui)
     external_id = str(uuid4())
+    recipient = await notify.create_recipient(external_id, payload.phone)
+
+    # Bloqueio 2: numero sem WhatsApp valido -> rollback do recipient
+    if recipient.whatsapp_valid is False:
+        if recipient.id:
+            try:
+                await notify.delete_recipient(recipient.id)
+            except Exception:
+                pass
+        raise BadRequest("numero sem WhatsApp valido")
+
+    # Cria usuario local apenas apos validar Notify + WhatsApp
     db.add(User(external_id=external_id, phone=payload.phone))
     await db.flush()
-
     await users_service.set_user_role(db, external_id, payload.role, enabled=True)
-    await notify.create_recipient(external_id, payload.phone)
     await db.commit()
 
     return RegisterResponse(
