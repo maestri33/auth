@@ -14,7 +14,8 @@ _DEFAULT_SECRET = "change-me-in-production"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AUTH_",
-        env_file=".env",
+        # Prod (/opt/auth/.env) carrega primeiro; .env local em dev sobrescreve.
+        env_file=("/opt/auth/.env", "/etc/auth/auth.env", ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
