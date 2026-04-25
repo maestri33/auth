@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from auth_service.clients import service as clients_service
@@ -16,6 +18,7 @@ from auth_service.core.rate_limit import limiter
 from auth_service.core.security import create_client_token
 
 _settings = get_settings()
+_log = logging.getLogger("auth.oauth")
 router = APIRouter(tags=["oauth"])
 
 
@@ -33,6 +36,7 @@ async def issue_token(
     )
     ttl_minutes = 60
     token = create_client_token(client.client_id, granted, ttl_minutes=ttl_minutes)
+    _log.info("oauth.token_issued", extra={"client_id": client.client_id, "scopes": granted})
     return TokenResponse(
         access_token=token,
         expires_in=ttl_minutes * 60,

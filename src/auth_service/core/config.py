@@ -40,9 +40,17 @@ class Settings(BaseSettings):
     notify_cli: str = "notify"
     notify_timeout_seconds: float = 10.0
 
+    # IP-based (slowapi)
     ratelimit_otp: str = "5/minute"
     ratelimit_login: str = "10/minute"
     ratelimit_oauth: str = "30/minute"
+    # Identity-based (in-memory por external_id/phone)
+    ratelimit_otp_id: str = "3/minute"
+    ratelimit_login_id: str = "5/minute"
+
+    log_level: str = "INFO"
+    healthcheck_notify_timeout: float = 2.0
+    notify_subprocess_timeout: float = 15.0
 
     def resolve_jwt_secret(self) -> str:
         if self.jwt_secret and self.jwt_secret != _DEFAULT_SECRET:

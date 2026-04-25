@@ -29,10 +29,13 @@ def _parse_recipient(data: dict, *, exists: bool | None = None) -> NotifyRecipie
 
 
 class NotifyClient:
-    def __init__(self, base_url: str, cli: str, timeout: float) -> None:
+    def __init__(
+        self, base_url: str, cli: str, timeout: float, subprocess_timeout: float = 15.0
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cli = cli
         self.timeout = timeout
+        self.subprocess_timeout = subprocess_timeout
 
     async def check_recipient(self, number: str) -> NotifyRecipient:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -84,7 +87,16 @@ class NotifyClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _stdout, stderr = await proc.communicate()
+        try:
+            _stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=self.subprocess_timeout
+            )
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise RuntimeError(
+                f"notify CLI timeout apos {self.subprocess_timeout}s"
+            ) from exc
         if proc.returncode != 0:
             raise RuntimeError(f"notify CLI failed: {stderr.decode().strip()}")
 
@@ -95,4 +107,9 @@ async def notify_client_from_db(db, settings) -> NotifyClient:
 
     base_url = await config_service.get_value(db, "notify_base_url", settings.notify_base_url)
     cli = await config_service.get_value(db, "notify_cli", settings.notify_cli)
-    return NotifyClient(base_url, cli, settings.notify_timeout_seconds)
+    return NotifyClient(
+        base_url,
+        cli,
+        settings.notify_timeout_seconds,
+        subprocess_timeout=settings.notify_subprocess_timeout,
+    )

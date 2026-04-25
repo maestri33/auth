@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 
 from auth_service.auth import service as auth_service
@@ -22,7 +23,7 @@ from auth_service.core.config import get_settings
 from auth_service.core.deps import DbSession
 from auth_service.core.docs import DOCS_DIR, markdown_response
 from auth_service.core.exceptions import BadRequest, Conflict, NotFound, Unauthorized
-from auth_service.core.rate_limit import limiter
+from auth_service.core.rate_limit import IdRateLimiter, limiter
 from auth_service.core.security import (
     create_access_token,
     create_refresh_token,
@@ -34,9 +35,14 @@ from auth_service.users import service as users_service
 from auth_service.users.models import User
 
 _settings = get_settings()
+_log = logging.getLogger("auth.flow")
 router = APIRouter(tags=["auth"])
 
 INITIAL_ROLES = {"lead", "candidato"}
+
+# Rate limiters por identidade — paralelo ao slowapi (que e por IP)
+_otp_id_limiter = IdRateLimiter(_settings.ratelimit_otp_id)
+_login_id_limiter = IdRateLimiter(_settings.ratelimit_login_id)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +121,10 @@ async def register(payload: RegisterRequest, db: DbSession) -> RegisterResponse:
     await users_service.set_user_role(db, external_id, payload.role, enabled=True)
     await db.commit()
 
+    _log.info(
+        "user.registered",
+        extra={"external_id": external_id, "role": payload.role, "phone": payload.phone},
+    )
     return RegisterResponse(
         status="ok",
         message="cadastro realizado com sucesso",
@@ -152,11 +162,20 @@ async def otp_request(
     if not user:
         raise NotFound("usuario nao encontrado")
 
+    # Rate limit por identidade (paralelo ao IP)
+    if not _otp_id_limiter.check(user.external_id):
+        _log.warning("otp.ratelimited.id", extra={"external_id": user.external_id})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="muitas tentativas para este usuario; aguarde",
+        )
+
     notify = await notify_client_from_db(db, _settings)
     otp = await auth_service.create_otp(db, user.external_id)
     await notify.send_notification(user.external_id, auth_service.build_otp_message(otp))
     await db.commit()
 
+    _log.info("otp.sent", extra={"external_id": user.external_id})
     return OtpResponse(status="ok", message="otp enviado com sucesso", external_id=user.external_id)
 
 
@@ -179,11 +198,23 @@ async def login(
 ) -> TokenResponse:
     if not await db.get(User, payload.external_id):
         raise NotFound("usuario nao encontrado")
-    await auth_service.consume_otp(db, payload.external_id, payload.otp)
+    # Rate limit por identidade — protege contra brute-force de OTP por usuario
+    if not _login_id_limiter.check(payload.external_id):
+        _log.warning("login.ratelimited.id", extra={"external_id": payload.external_id})
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="muitas tentativas; aguarde",
+        )
+    try:
+        await auth_service.consume_otp(db, payload.external_id, payload.otp)
+    except Unauthorized:
+        _log.warning("login.failed", extra={"external_id": payload.external_id, "reason": "bad_otp"})
+        raise
     roles = await users_service.active_roles(db, payload.external_id)
     access = create_access_token(payload.external_id, roles)
     refresh = create_refresh_token(payload.external_id, roles)
     await db.commit()
+    _log.info("login.success", extra={"external_id": payload.external_id, "roles": roles})
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,
