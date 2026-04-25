@@ -37,7 +37,16 @@ async def _check_db() -> dict:
 
 
 async def _check_notify(settings) -> dict:
-    url = settings.notify_base_url.rstrip("/")
+    """Resolve notify_base_url da mesma fonte que o fluxo real (DB > env)."""
+    from auth_service.config_app import service as config_service
+
+    try:
+        async with SessionLocal() as db:
+            url = (
+                await config_service.get_value(db, "notify_base_url", settings.notify_base_url)
+            ).rstrip("/")
+    except Exception:  # noqa: BLE001
+        url = settings.notify_base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=settings.healthcheck_notify_timeout) as client:
             r = await client.get(f"{url}/")
