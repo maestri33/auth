@@ -191,6 +191,50 @@ Header: `{"alg":"HS256","typ":"JWT","kid":"v1"}`. Payload comum:
 .venv/bin/pytest -m notify_live           # exige Notify em AUTH_NOTIFY_BASE_URL
 ```
 
+## CLI (`auth-cli`)
+
+Instalado como `console_script` junto com o pacote.
+
+```
+auth-cli --help                                  # arvore completa de comandos
+auth-cli info                                    # config carregada
+auth-cli health --base-url http://127.0.0.1      # bate em /healthz
+
+auth-cli db upgrade                              # alembic upgrade head
+auth-cli db revision -m "add table xpto"
+
+auth-cli clients create app-x --name "App X" --scope admin
+auth-cli clients list
+auth-cli clients rotate app-x                    # novo client_secret
+auth-cli clients delete app-x
+
+auth-cli users list --limit 100
+auth-cli users get <external_id|phone>
+auth-cli users grant <external_id> <role>
+auth-cli users revoke <external_id> <role>
+auth-cli users delete <external_id>
+
+auth-cli roles list
+auth-cli roles create ops --description "operadores" -x admin
+
+auth-cli token decode <jwt>                      # valida + imprime header/payload
+auth-cli otp purge                               # remove OTP consumidos/expirados
+
+auth-cli config show
+auth-cli config set notify_base_url http://10.10.10.119:8000
+
+auth-cli server run --host 0.0.0.0 --port 80
+auth-cli server run --reload                     # dev
+```
+
+Bootstrap do primeiro client admin (substitui o snippet Python anterior):
+
+```bash
+auth-cli clients create bootstrap --name bootstrap --scope admin
+```
+
+O `client_secret` aparece **uma única vez** — anote.
+
 ## Lint
 
 ```bash

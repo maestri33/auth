@@ -105,7 +105,7 @@ async def register(payload: RegisterRequest, db: DbSession) -> RegisterResponse:
         if recipient.id:
             try:
                 await notify.delete_recipient(recipient.id)
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
         raise BadRequest("numero sem WhatsApp valido")
 

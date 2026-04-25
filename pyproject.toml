@@ -15,7 +15,11 @@ dependencies = [
     "pyjwt>=2.9",
     "slowapi>=0.1.9",
     "httpx>=0.28",
+    "typer>=0.12",
 ]
+
+[project.scripts]
+auth-cli = "auth_service.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -44,6 +48,7 @@ ignore = ["S101", "B008", "S105", "S106", "E501"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106", "S311"]
 "alembic/*" = ["E501"]
+"src/auth_service/cli.py" = ["S104", "S603", "B006"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
