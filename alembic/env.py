@@ -11,10 +11,12 @@ from auth_service.core.config import get_settings
 from auth_service.core.database import Base
 
 # Importa todos os models para registrar metadata
-from auth_service.users import models as _users  # noqa: F401
-from auth_service.roles import models as _roles  # noqa: F401
-from auth_service.config_app import models as _cfg  # noqa: F401
-from auth_service.clients import models as _clients  # noqa: F401
+from auth_service.audit import models as _audit  # noqa: F401, E402, I001
+from auth_service.clients import models as _clients  # noqa: F401, E402, I001
+from auth_service.config_app import models as _cfg  # noqa: F401, E402, I001
+from auth_service.roles import models as _roles  # noqa: F401, E402, I001
+from auth_service.sessions import models as _sessions  # noqa: F401, E402, I001
+from auth_service.users import models as _users  # noqa: F401, E402, I001
 
 
 config = context.config

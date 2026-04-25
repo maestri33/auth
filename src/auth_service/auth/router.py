@@ -6,6 +6,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 
+from auth_service.audit import service as audit_service
 from auth_service.auth import service as auth_service
 from auth_service.auth.schemas import (
     CheckRequest,
@@ -31,6 +32,7 @@ from auth_service.core.security import (
 )
 from auth_service.notify.client import notify_client_from_db
 from auth_service.roles.models import Role, RoleIncompatibility
+from auth_service.sessions import service as sessions_service
 from auth_service.users import service as users_service
 from auth_service.users.models import User
 
@@ -125,6 +127,16 @@ async def register(payload: RegisterRequest, db: DbSession) -> RegisterResponse:
         "user.registered",
         extra={"external_id": external_id, "role": payload.role, "phone": payload.phone},
     )
+    await audit_service.record(
+        db,
+        action="user.registered",
+        actor_type="user",
+        actor_id=external_id,
+        target_type="user",
+        target_id=external_id,
+        metadata={"role": payload.role, "phone": payload.phone},
+    )
+    await db.commit()
     return RegisterResponse(
         status="ok",
         message="cadastro realizado com sucesso",
@@ -146,7 +158,7 @@ async def get_otp_doc():
     response_model=OtpResponse,
     responses={400: {"description": "parametros invalidos"}, 404: {"description": "usuario nao encontrado"}},
 )
-@limiter.limit(_settings.ratelimit_otp)
+@limiter.limit(lambda: get_settings().ratelimit_otp)
 async def otp_request(
     request: Request, response: Response, payload: OtpRequest, db: DbSession
 ) -> OtpResponse:
@@ -192,7 +204,7 @@ async def get_login_doc():
     response_model=TokenResponse,
     responses={401: {"description": "otp invalido ou expirado"}, 404: {"description": "usuario nao encontrado"}},
 )
-@limiter.limit(_settings.ratelimit_login)
+@limiter.limit(lambda: get_settings().ratelimit_login)
 async def login(
     request: Request, response: Response, payload: LoginRequest, db: DbSession
 ) -> TokenResponse:
@@ -209,12 +221,36 @@ async def login(
         await auth_service.consume_otp(db, payload.external_id, payload.otp)
     except Unauthorized:
         _log.warning("login.failed", extra={"external_id": payload.external_id, "reason": "bad_otp"})
+        await audit_service.record(
+            db,
+            action="login.failed",
+            actor_type="user",
+            actor_id=payload.external_id,
+            target_type="user",
+            target_id=payload.external_id,
+            metadata={"reason": "bad_otp"},
+            ip=request.client.host if request.client else None,
+        )
+        await db.commit()
         raise
     roles = await users_service.active_roles(db, payload.external_id)
+    ua = request.headers.get("user-agent")
+    ip = request.client.host if request.client else None
+    jti = await sessions_service.issue(db, payload.external_id, user_agent=ua, ip=ip)
     access = create_access_token(payload.external_id, roles)
-    refresh = create_refresh_token(payload.external_id, roles)
+    refresh = create_refresh_token(payload.external_id, roles, jti)
+    await audit_service.record(
+        db,
+        action="login.success",
+        actor_type="user",
+        actor_id=payload.external_id,
+        target_type="user",
+        target_id=payload.external_id,
+        metadata={"roles": roles, "jti": jti},
+        ip=ip,
+    )
     await db.commit()
-    _log.info("login.success", extra={"external_id": payload.external_id, "roles": roles})
+    _log.info("login.success", extra={"external_id": payload.external_id, "roles": roles, "jti": jti})
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,
@@ -234,20 +270,73 @@ async def get_refresh_doc():
 @router.post(
     "/refresh/",
     response_model=TokenResponse,
-    responses={401: {"description": "refresh_token invalido"}, 404: {"description": "usuario nao encontrado"}},
+    responses={401: {"description": "refresh_token invalido ou revogado"}, 404: {"description": "usuario nao encontrado"}},
 )
-async def refresh(payload: RefreshRequest, db: DbSession) -> TokenResponse:
+async def refresh(request: Request, payload: RefreshRequest, db: DbSession) -> TokenResponse:
     try:
         decoded = decode_token(payload.refresh_token, expected_type="refresh")
     except ValueError as exc:
         raise Unauthorized(str(exc)) from exc
+
     external_id = decoded["sub"]
+    old_jti = decoded.get("jti")
+    if not old_jti:
+        # Tokens emitidos antes da introducao do whitelist — rejeita por seguranca
+        raise Unauthorized("refresh_token sem jti (reemita via /login)")
+
     if not await db.get(User, external_id):
         raise NotFound("usuario nao encontrado")
+
+    session = await sessions_service.get(db, old_jti)
+    if not session or session.external_id != external_id:
+        raise Unauthorized("refresh_token desconhecido")
+
+    # Reuse detection: refresh ja revogado -> sinal de comprometimento, revoga TUDO
+    if session.revoked_at is not None:
+        revoked_count = await sessions_service.revoke_user_sessions(
+            db, external_id, reason="reuse_detected"
+        )
+        await audit_service.record(
+            db,
+            action="session.reuse_detected",
+            actor_type="user",
+            actor_id=external_id,
+            target_type="user",
+            target_id=external_id,
+            metadata={"old_jti": old_jti, "revoked_count": revoked_count},
+            ip=request.client.host if request.client else None,
+        )
+        await db.commit()
+        _log.warning(
+            "session.reuse_detected",
+            extra={"external_id": external_id, "old_jti": old_jti, "revoked": revoked_count},
+        )
+        raise Unauthorized("refresh_token reutilizado — sessoes revogadas")
+
+    # Rotation: revoga o jti antigo e emite novo
+    await sessions_service.revoke(db, old_jti, reason="rotated")
     roles = await users_service.active_roles(db, external_id)
+    ua = request.headers.get("user-agent")
+    ip = request.client.host if request.client else None
+    new_jti = await sessions_service.issue(db, external_id, user_agent=ua, ip=ip)
+    await audit_service.record(
+        db,
+        action="session.refreshed",
+        actor_type="user",
+        actor_id=external_id,
+        target_type="session",
+        target_id=new_jti,
+        metadata={"old_jti": old_jti, "new_jti": new_jti},
+        ip=ip,
+    )
+    await db.commit()
+    _log.info(
+        "session.refreshed",
+        extra={"external_id": external_id, "old_jti": old_jti, "new_jti": new_jti},
+    )
     return TokenResponse(
         access_token=create_access_token(external_id, roles),
-        refresh_token=create_refresh_token(external_id, roles),
+        refresh_token=create_refresh_token(external_id, roles, new_jti),
         external_id=external_id,
         roles=roles,
     )

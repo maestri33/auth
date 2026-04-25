@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 
+from auth_service.audit.router import router as audit_router
 from auth_service.auth.router import router as auth_router
 from auth_service.clients.router import router as clients_router
 from auth_service.config_app.router import router as config_router
@@ -22,6 +23,7 @@ from auth_service.core.middleware import RequestIdMiddleware
 from auth_service.core.rate_limit import limiter
 from auth_service.roles.router import router as roles_router
 from auth_service.roles.service import seed_defaults
+from auth_service.sessions.router import router as sessions_router
 from auth_service.users.router import router as users_router
 
 _log = logging.getLogger("auth.app")
@@ -45,7 +47,7 @@ async def _check_notify(settings) -> dict:
             url = (
                 await config_service.get_value(db, "notify_base_url", settings.notify_base_url)
             ).rstrip("/")
-    except Exception:  # noqa: BLE001
+    except Exception:
         url = settings.notify_base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=settings.healthcheck_notify_timeout) as client:
@@ -65,7 +67,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
     settings.resolve_jwt_secret()  # bootstrap (gera/persiste se preciso)
-    _log.info("starting", extra={"env": settings.env, "version": "0.4.0"})
+    _log.info("starting", extra={"env": settings.env, "version": "0.5.0"})
 
     await init_db()
     async with SessionLocal() as db:
@@ -80,7 +82,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Auth",
-        version="0.4.0",
+        version="0.5.0",
         description="Servico de autenticacao OTP + JWT + M2M OAuth2 (client_credentials).",
         lifespan=lifespan,
         docs_url="/docs",
@@ -91,6 +93,8 @@ def create_app() -> FastAPI:
             {"name": "users", "description": "Roles e transicoes de usuarios"},
             {"name": "roles", "description": "Gestao de roles do sistema"},
             {"name": "config", "description": "Configuracao do servico"},
+            {"name": "sessions", "description": "Gestao de sessoes (refresh tokens whitelist)"},
+            {"name": "audit", "description": "Audit log de eventos sensiveis"},
             {"name": "health", "description": "Liveness e readiness probes"},
         ],
     )
@@ -113,11 +117,13 @@ def create_app() -> FastAPI:
     app.include_router(users_router)
     app.include_router(roles_router)
     app.include_router(clients_router)
+    app.include_router(sessions_router)
+    app.include_router(audit_router)
 
     @app.get("/healthz", tags=["health"])
     async def healthz() -> dict:
         """Liveness — responde se o processo esta vivo."""
-        return {"status": "ok", "service": settings.app_name, "version": "0.4.0"}
+        return {"status": "ok", "service": settings.app_name, "version": "0.5.0"}
 
     @app.get("/healthz/ready", tags=["health"])
     async def healthz_ready() -> JSONResponse:

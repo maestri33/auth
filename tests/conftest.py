@@ -29,10 +29,18 @@ async def app():
     # Import tardio para pegar env vars
     from auth_service.core.config import get_settings
     from auth_service.core.database import Base, SessionLocal, engine
+    from auth_service.core.rate_limit import limiter
     from auth_service.main import create_app
     from auth_service.roles.service import seed_defaults
 
     get_settings.cache_clear()
+    # Reset slowapi state entre testes (in-memory bucket)
+    limiter.reset()
+    # Reset IdRateLimiters dos routers
+    from auth_service.auth import router as auth_router
+    auth_router._otp_id_limiter.reset()
+    auth_router._login_id_limiter.reset()
+
     application = create_app()
 
     # Schema fresh por sessão de teste

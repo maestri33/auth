@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
+from auth_service.audit import service as audit_service
 from auth_service.core.deps import DbSession, require_scopes
 from auth_service.core.docs import DOCS_DIR, markdown_response
 from auth_service.core.exceptions import NotFound
@@ -28,23 +29,43 @@ async def get_user_roles(external_id: str, db: DbSession) -> UserRolesOut:
     return UserRolesOut(external_id=external_id, roles=await users_service.active_roles(db, external_id))
 
 
-@router.patch(
-    "/{external_id}/roles",
-    response_model=UserRolesOut,
-    dependencies=[Depends(require_scopes("admin"))],
-)
-async def patch_user_role(external_id: str, payload: RolePatch, db: DbSession) -> UserRolesOut:
+@router.patch("/{external_id}/roles", response_model=UserRolesOut)
+async def patch_user_role(
+    external_id: str,
+    payload: RolePatch,
+    db: DbSession,
+    actor: dict = Depends(require_scopes("admin")),
+) -> UserRolesOut:
     await users_service.set_user_role(db, external_id, payload.role, payload.enabled)
+    await audit_service.record(
+        db,
+        action="user.role_set",
+        actor_type="client",
+        actor_id=actor.get("sub"),
+        target_type="user",
+        target_id=external_id,
+        metadata={"role": payload.role, "enabled": payload.enabled},
+    )
     await db.commit()
     return UserRolesOut(external_id=external_id, roles=await users_service.active_roles(db, external_id))
 
 
-@router.post(
-    "/{external_id}/transition",
-    response_model=UserRolesOut,
-    dependencies=[Depends(require_scopes("admin"))],
-)
-async def transition(external_id: str, payload: TransitionRequest, db: DbSession) -> UserRolesOut:
-    await users_service.transition_user_role(db, external_id, payload.role)
+@router.post("/{external_id}/transition", response_model=UserRolesOut)
+async def transition(
+    external_id: str,
+    payload: TransitionRequest,
+    db: DbSession,
+    actor: dict = Depends(require_scopes("admin")),
+) -> UserRolesOut:
+    target = await users_service.transition_user_role(db, external_id, payload.role)
+    await audit_service.record(
+        db,
+        action="user.role_transitioned",
+        actor_type="client",
+        actor_id=actor.get("sub"),
+        target_type="user",
+        target_id=external_id,
+        metadata={"from": payload.role, "to": target},
+    )
     await db.commit()
     return UserRolesOut(external_id=external_id, roles=await users_service.active_roles(db, external_id))

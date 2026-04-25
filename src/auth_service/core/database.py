@@ -38,9 +38,11 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 async def init_db() -> None:
     """Cria tabelas a partir dos models. Em produção, prefira Alembic."""
     # Importa todos os models para registrar no metadata
+    from auth_service.audit import models as _audit  # noqa: F401
     from auth_service.clients import models as _clients  # noqa: F401
     from auth_service.config_app import models as _cfg  # noqa: F401
     from auth_service.roles import models as _roles  # noqa: F401
+    from auth_service.sessions import models as _sessions  # noqa: F401
     from auth_service.users import models as _users  # noqa: F401
 
     async with engine.begin() as conn:

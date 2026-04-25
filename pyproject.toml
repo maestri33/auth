@@ -1,6 +1,6 @@
 [project]
 name = "auth-service"
-version = "0.3.0"
+version = "0.5.0"
 description = "FastAPI authentication service: OTP + JWT + M2M OAuth2 client_credentials"
 requires-python = ">=3.11"
 dependencies = [

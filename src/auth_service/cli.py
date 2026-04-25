@@ -16,6 +16,7 @@ from rich.table import Table
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_service.audit import service as audit_service
 from auth_service.clients.models import OAuthClient
 from auth_service.clients.schemas import ClientCreate
 from auth_service.clients.service import create_client as create_client_svc
@@ -31,6 +32,7 @@ from auth_service.roles.models import Role
 from auth_service.roles.schemas import RoleCreate
 from auth_service.roles.service import create_role as create_role_svc
 from auth_service.roles.service import list_roles as list_roles_svc
+from auth_service.sessions import service as sessions_service
 from auth_service.users import service as users_service
 from auth_service.users.models import OtpChallenge, User
 
@@ -470,6 +472,183 @@ def db_revision(
     if autogenerate:
         args.insert(1, "--autogenerate")
     raise typer.Exit(code=_alembic(args))
+
+
+# ===========================================================================
+# sessions (refresh tokens whitelist)
+# ===========================================================================
+sessions_app = typer.Typer(help="Gestao de sessoes (refresh tokens).", no_args_is_help=True)
+app.add_typer(sessions_app, name="sessions")
+
+
+@sessions_app.command("list")
+def sessions_list(
+    external_id: Annotated[str, typer.Argument()],
+    include_revoked: Annotated[bool, typer.Option("--all/--active-only")] = True,
+) -> None:
+    """Lista sessoes (refresh tokens) de um usuario."""
+
+    async def _do():
+        async with SessionLocal() as db:
+            return await sessions_service.list_for_user(
+                db, external_id, include_revoked=include_revoked
+            )
+
+    rows = _run(_do())
+    table = Table(title=f"sessions for {external_id} ({len(rows)})")
+    table.add_column("jti", style="cyan")
+    table.add_column("created_at", style="dim")
+    table.add_column("expires_at", style="dim")
+    table.add_column("revoked")
+    table.add_column("ip")
+    for s in rows:
+        revoked = (
+            f"{s.revoked_reason} @ {s.revoked_at.isoformat(timespec='seconds')}"
+            if s.revoked_at
+            else ""
+        )
+        table.add_row(
+            s.jti[:12] + "…",
+            s.created_at.isoformat(timespec="seconds"),
+            s.expires_at.isoformat(timespec="seconds"),
+            revoked,
+            s.ip or "",
+        )
+    console.print(table)
+
+
+@sessions_app.command("revoke")
+def sessions_revoke(
+    jti: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option("--reason", "-r")] = "manual",
+) -> None:
+    """Revoga uma sessao especifica."""
+
+    async def _do() -> bool:
+        async with SessionLocal() as db:
+            ok = await sessions_service.revoke(db, jti, reason=reason)
+            if ok:
+                await audit_service.record(
+                    db,
+                    action="session.revoked",
+                    actor_type="system",
+                    target_type="session",
+                    target_id=jti,
+                    metadata={"reason": reason, "via": "cli"},
+                )
+            await db.commit()
+            return ok
+
+    if _run(_do()):
+        _ok(f"sessao {jti} revogada (reason={reason})")
+    else:
+        _die("sessao nao encontrada ou ja revogada", code=2)
+
+
+@sessions_app.command("revoke-all")
+def sessions_revoke_all(
+    external_id: Annotated[str, typer.Argument()],
+    reason: Annotated[str, typer.Option("--reason", "-r")] = "manual",
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Revoga todas as sessoes ativas de um usuario."""
+    if not yes:
+        typer.confirm(f"revogar todas as sessoes de {external_id}?", abort=True)
+
+    async def _do() -> int:
+        async with SessionLocal() as db:
+            n = await sessions_service.revoke_user_sessions(db, external_id, reason=reason)
+            if n:
+                await audit_service.record(
+                    db,
+                    action="session.revoked_all",
+                    actor_type="system",
+                    target_type="user",
+                    target_id=external_id,
+                    metadata={"reason": reason, "count": n, "via": "cli"},
+                )
+            await db.commit()
+            return n
+
+    n = _run(_do())
+    _ok(f"{n} sessao(es) revogada(s)")
+
+
+@sessions_app.command("purge")
+def sessions_purge() -> None:
+    """Remove sessoes expiradas ou ja revogadas."""
+
+    async def _do() -> int:
+        async with SessionLocal() as db:
+            n = await sessions_service.purge_expired_or_revoked(db)
+            await db.commit()
+            return n
+
+    _ok(f"{_run(_do())} sessao(es) removida(s)")
+
+
+# ===========================================================================
+# audit
+# ===========================================================================
+audit_app = typer.Typer(help="Audit log de eventos sensiveis.", no_args_is_help=True)
+app.add_typer(audit_app, name="audit")
+
+
+@audit_app.command("list")
+def audit_list(
+    actor_id: Annotated[str, typer.Option("--actor")] = "",
+    action: Annotated[str, typer.Option("--action")] = "",
+    target_id: Annotated[str, typer.Option("--target")] = "",
+    limit: Annotated[int, typer.Option("--limit", "-l", min=1, max=500)] = 50,
+) -> None:
+    """Lista eventos do audit log (mais recente primeiro)."""
+
+    async def _do():
+        async with SessionLocal() as db:
+            return await audit_service.query(
+                db,
+                actor_id=actor_id or None,
+                action=action or None,
+                target_id=target_id or None,
+                limit=limit,
+            )
+
+    rows = _run(_do())
+    table = Table(title=f"audit ({len(rows)})")
+    table.add_column("ts", style="dim")
+    table.add_column("action", style="cyan")
+    table.add_column("actor")
+    table.add_column("target")
+    table.add_column("ip")
+    table.add_column("rid", style="dim")
+    for e in rows:
+        table.add_row(
+            e.ts.isoformat(timespec="seconds"),
+            e.action,
+            f"{e.actor_type}:{e.actor_id or '-'}",
+            f"{e.target_type or '-'}:{e.target_id or '-'}",
+            e.ip or "",
+            (e.request_id or "-")[:12],
+        )
+    console.print(table)
+
+
+@audit_app.command("purge")
+def audit_purge(
+    older_than_days: Annotated[int, typer.Option("--older-than", min=1)] = 90,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    """Remove eventos mais antigos que N dias."""
+    if not yes:
+        typer.confirm(f"deletar eventos com mais de {older_than_days} dias?", abort=True)
+
+    async def _do() -> int:
+        async with SessionLocal() as db:
+            n = await audit_service.purge_older_than(db, older_than_days)
+            await db.commit()
+            return n
+
+    _ok(f"{_run(_do())} evento(s) removido(s)")
 
 
 # ===========================================================================

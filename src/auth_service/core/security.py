@@ -74,7 +74,7 @@ def create_access_token(external_id: str, roles: list[str]) -> str:
     return _encode(payload)
 
 
-def create_refresh_token(external_id: str, roles: list[str]) -> str:
+def create_refresh_token(external_id: str, roles: list[str], jti: str) -> str:
     settings = get_settings()
     now = _now()
     payload = {
@@ -82,6 +82,7 @@ def create_refresh_token(external_id: str, roles: list[str]) -> str:
         "sub": external_id,
         "roles": roles,
         "type": "refresh",
+        "jti": jti,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=settings.refresh_token_days)).timestamp()),
     }

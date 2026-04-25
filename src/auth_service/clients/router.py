@@ -4,6 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response, status
 
+from auth_service.audit import service as audit_service
 from auth_service.clients import service as clients_service
 from auth_service.clients.schemas import (
     ClientCreate,
@@ -27,7 +28,7 @@ router = APIRouter(tags=["oauth"])
     response_model=TokenResponse,
     responses={401: {"description": "client invalido"}},
 )
-@limiter.limit(_settings.ratelimit_oauth)
+@limiter.limit(lambda: get_settings().ratelimit_oauth)
 async def issue_token(
     request: Request, response: Response, payload: TokenRequest, db: DbSession
 ) -> TokenResponse:
@@ -36,6 +37,17 @@ async def issue_token(
     )
     ttl_minutes = 60
     token = create_client_token(client.client_id, granted, ttl_minutes=ttl_minutes)
+    await audit_service.record(
+        db,
+        action="oauth.token_issued",
+        actor_type="client",
+        actor_id=client.client_id,
+        target_type="client",
+        target_id=client.client_id,
+        metadata={"scopes": granted, "ttl_minutes": ttl_minutes},
+        ip=request.client.host if request.client else None,
+    )
+    await db.commit()
     _log.info("oauth.token_issued", extra={"client_id": client.client_id, "scopes": granted})
     return TokenResponse(
         access_token=token,
@@ -57,8 +69,20 @@ async def list_clients(db: DbSession) -> ClientListOut:
     "/oauth/clients/",
     response_model=ClientCreateOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_scopes("admin"))],
     responses={409: {"description": "client_id ja existe"}},
 )
-async def create_client(payload: ClientCreate, db: DbSession) -> ClientCreateOut:
-    return await clients_service.create_client(db, payload)
+async def create_client(
+    payload: ClientCreate, db: DbSession, actor: dict = Depends(require_scopes("admin"))
+) -> ClientCreateOut:
+    out = await clients_service.create_client(db, payload)
+    await audit_service.record(
+        db,
+        action="oauth.client.created",
+        actor_type="client",
+        actor_id=actor.get("sub"),
+        target_type="client",
+        target_id=payload.client_id,
+        metadata={"name": payload.name, "scopes": payload.scopes},
+    )
+    await db.commit()
+    return out
