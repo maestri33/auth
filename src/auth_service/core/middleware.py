@@ -20,6 +20,19 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         start = time.monotonic()
         try:
             response = await call_next(request)
+            duration_ms = round((time.monotonic() - start) * 1000, 1)
+            response.headers["x-request-id"] = rid
+            _log.info(
+                "request",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": duration_ms,
+                    "client": request.client.host if request.client else None,
+                },
+            )
+            return response
         except Exception:
             duration_ms = round((time.monotonic() - start) * 1000, 1)
             _log.exception(
@@ -34,17 +47,3 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             raise
         finally:
             request_id_ctx.reset(token)
-
-        duration_ms = round((time.monotonic() - start) * 1000, 1)
-        response.headers["x-request-id"] = rid
-        _log.info(
-            "request",
-            extra={
-                "method": request.method,
-                "path": request.url.path,
-                "status": response.status_code,
-                "duration_ms": duration_ms,
-                "client": request.client.host if request.client else None,
-            },
-        )
-        return response
