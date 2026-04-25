@@ -191,6 +191,44 @@ Header: `{"alg":"HS256","typ":"JWT","kid":"v1"}`. Payload comum:
 .venv/bin/pytest -m notify_live           # exige Notify em AUTH_NOTIFY_BASE_URL
 ```
 
+## Audit log
+
+Eventos sensiveis sao persistidos em `audit_events` (queryable, com retention configuravel).
+
+Eventos cobertos:
+- `user.registered`, `login.success`, `login.failed`
+- `oauth.token_issued`, `oauth.client.created`
+- `role.created`, `user.role_set`, `user.role_transitioned`
+- `config.updated`
+- `session.refreshed`, `session.revoked`, `session.revoked_all`, `session.reuse_detected`
+
+Cada evento tem `actor_type/id`, `target_type/id`, `metadata_json`, `request_id` (correlaciona com logs estruturados) e `ip`.
+
+```bash
+GET /audit/events?actor_id=...&action=login.success&limit=100   # admin
+auth-cli audit list --action login.failed --limit 50
+auth-cli audit purge --older-than 90
+```
+
+## Sessões e revogação de JWT
+
+Refresh tokens sao persistidos em whitelist (`refresh_tokens` com `jti`).
+
+- **Validacao** de `/refresh/`: assinatura + jti em DB + nao expirado + nao revogado.
+- **Rotacao**: cada `/refresh/` revoga o jti antigo e emite novo. O refresh anterior fica invalido.
+- **Reuse-detection**: tentativa de usar um refresh ja revogado dispara revogacao em cadeia de TODAS as sessoes do usuario (`reason="reuse_detected"`) — assume comprometimento.
+
+```bash
+GET  /sessions/{external_id}                # admin: lista sessoes
+POST /sessions/revoke/{jti}                 # admin: revoga uma
+POST /sessions/revoke-all/{external_id}     # admin: revoga todas
+
+auth-cli sessions list <external_id>
+auth-cli sessions revoke <jti> --reason "compromise"
+auth-cli sessions revoke-all <external_id> --reason "user request"
+auth-cli sessions purge                     # remove revogadas/expiradas
+```
+
 ## CLI (`auth-cli`)
 
 Instalado como `console_script` junto com o pacote.
